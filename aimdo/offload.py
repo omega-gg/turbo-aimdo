@@ -180,12 +180,12 @@ class _L:
 # weights from disk (file path + from_module-file below), so an inactive model's host cost is only
 # OS page cache. GPU-agnostic: all sizes are measured (placement.py / mem_get_info); nothing
 # hardcodes VRAM/RAM.
-# dev -> [HBOffloaderVBAR] most-recently-active first (== current_loaded_models [CU L805/945])
+# dev -> [Offloader] most-recently-active first (== current_loaded_models [CU L805/945])
 _LOADED = {}
-_ACTIVE = {}    # dev -> the HBOffloaderVBAR whose pages are currently prioritized + resident
+_ACTIVE = {}    # dev -> the Offloader whose pages are currently prioritized + resident
 
 
-class HBOffloaderVBAR:
+class Offloader:
     def __init__(self, root, tdir=None, device="cuda:0", compute_dtype=torch.bfloat16,
                  lora_files=None, from_module=False, pin_budget=0, manage=False):
         self.device = torch.device(device); self.dev = self.device.index or 0
@@ -475,7 +475,7 @@ class HBOffloaderVBAR:
         # stays page-cache only (== ComfyUI's file-slice source [CU memory_management.py L36-L75],
         # the fix for the PLAN "EMPIRICAL" page-cache starvation).
         if self.tdir is None:
-            raise ValueError("HBOffloaderVBAR(from_module=True) requires tdir (the model's "
+            raise ValueError("Offloader(from_module=True) requires tdir (the model's "
                              "checkpoint dir) so big weights stream from disk instead of being "
                              "held in RAM.")
         lin = []

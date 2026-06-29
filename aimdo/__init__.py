@@ -138,7 +138,7 @@ def _load_streamed(model, dtype, engine, lora_files):
     # GPU-resident.
     #
     # Uniform across engines (copy ComfyUI: every model is a managed dynamic VBAR -- see below):
-    # the transformer AND the text encoder are each a managed HBOffloaderVBAR with its own VBAR,
+    # the transformer AND the text encoder are each a managed Offloader with its own VBAR,
     # coordinated by the manager at load boundaries. Only the class table + qwen's on-cast
     # lightning(+angles) LoRA (passed in as lora_files) differ per engine. The TE is always
     # streamed from disk via from_module (host RAM = page cache only); qwen's Qwen2.5-VL loader
@@ -192,7 +192,7 @@ def _load_streamed(model, dtype, engine, lora_files):
     # on-demand cross-vbar eviction, which underperforms on this box (the deliberate
     # dynamic-for-dynamic no-unload is [CU model_management.py L824-828]; see PLAN-te-streaming.md
     # "EMPIRICAL").
-    transformer_offloader = offload.HBOffloaderVBAR(
+    transformer_offloader = offload.Offloader(
         meta_transformer, tdir, "cuda:0", lora_files=lora_files or None,
         pin_budget=placement.pin_budget(), manage=True)
 
@@ -211,7 +211,7 @@ def _load_streamed(model, dtype, engine, lora_files):
     # boundary and reloads it for the next encode (ComfyUI coexisting dynamic models
     # [CU model_patcher.py L1937-1941]), so host RAM is bounded and the transformer gets denoise
     # VRAM.
-    encoder_offloader = offload.HBOffloaderVBAR(
+    encoder_offloader = offload.Offloader(
         p.text_encoder, tdir=os.path.join(model, "text_encoder"), from_module=True,
         device="cuda:0", manage=True)
     # prepare() reloads the TE to GPU BEFORE the pipeline reads self._execution_device (computed at
@@ -260,7 +260,7 @@ def release(pipe):
     weight region and decommits the host buffer. This reclaims the host RAM (a plain del would leak
     it: the offloader<->module reference cycle keeps the buffer's __del__ from running) AND leaves
     the host addresses clean so the NEXT model can build in the same process (without it, a rebuild
-    faults with "already mapped"). See offload.HBOffloaderVBAR.free. No-op for a pipe with
+    faults with "already mapped"). See offload.Offloader.free. No-op for a pipe with
     no offloaders."""
     import traceback
 
