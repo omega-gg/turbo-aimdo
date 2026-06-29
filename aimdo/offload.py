@@ -456,8 +456,8 @@ class Offloader:
         # dotted SUFFIX and (shape, dtype). Pick the longest common segment-suffix; require it
         # unique. Returns (pairs[(module, disk_key)], missing[names], bad_dtypes). See aimdo.md.
         by_kind = {}
-        for k, (_, _, _nb, dtype, shape) in offsets.items():
-            by_kind.setdefault((tuple(shape), dtype), []).append(k.split("."))
+        for k, spec in offsets.items():
+            by_kind.setdefault((tuple(spec.shape), spec.dtype), []).append(k.split("."))
 
         pairs = []; missing = []; bad_dt = set()
         for name, m in linears:
