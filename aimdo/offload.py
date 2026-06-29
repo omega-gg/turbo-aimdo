@@ -21,16 +21,21 @@
 #  VBAR fault returns OOM and falls back to a temp buffer, so aimdo never overcommits).
 #
 #  Design, rationale, and the ComfyUI/comfy-aimdo [CU ...] / [AI ...] line references live in
-#  aimdo.md (kept in sync with the pinned upstream commits noted there).
+#  aimdo.md.
+#
+#  Based on (re-verify the line refs when bumping these):
+#    ComfyUI      @ 5955ddff52a2eda2ba0cf7f3fb0927c93fb2fbb8
+#    comfy-aimdo  @ ace72abefa1ede12a4b8a4e2c99919804e5f38e0
 # =================================================================================================
 import os, json, struct, torch
 from collections import namedtuple
 
-import comfy_aimdo.control as _ctl     # device init / CUDA alloc hooks
-import comfy_aimdo.torch as _at        # raw-pointer <-> torch.Tensor bridge
-import comfy_aimdo.host_buffer as _hb  # read_file_to_device (fast-DMA)
-import comfy_aimdo.vram_buffer as _vb  # reserved (VBAR) GPU cast buffer
-from comfy_aimdo.model_vbar import (   # VBAR residency allocator
+import comfy_aimdo.control as _ctl    # device init / CUDA alloc hooks
+import comfy_aimdo.torch as _at       # raw-pointer <-> torch.Tensor bridge
+import comfy_aimdo.host_buffer as _hb # read_file_to_device (fast-DMA)
+import comfy_aimdo.vram_buffer as _vb # reserved (VBAR) GPU cast buffer
+
+from comfy_aimdo.model_vbar import ( # VBAR residency allocator
     ModelVBAR, vbar_fault, vbar_unpin, vbar_signature_compare,
     vbars_reset_watermark_limits,
 )
@@ -270,7 +275,7 @@ class Offloader:
         # Cast buffers for the OFFLOADED case (weight didn't fault into its slot): two ping-pong
         # views from the reserved VRAMBuffer. The faulted case reads straight into the VBAR slot.
         largest = max(_align(offsets[weight_key].num_bytes) for weight_key in linears.values())
-        buffer_size = _align(largest) + 512
+        buffer_size = largest + 512
 
         # offload_stream is used only when prefetching; the sync path uses cast_buffer (= bufs[0]).
         self.offload_stream, self.cast_buffers = get_aimdo_cast_buffer(
@@ -432,7 +437,7 @@ class Offloader:
         # once per request, so no prefetch.
         largest = max(_align(offsets[weight_key].num_bytes) for _, weight_key in pairs)
         self.offload_stream, self.cast_buffers = get_aimdo_cast_buffer(
-            self.device_index, _align(largest) + 512)
+            self.device_index, largest + 512)
         self.cast_buffer = self.cast_buffers[0]; self.offload_stream = None
         self.pins = {}  # no pinned host weights -> stream from file
         self.files = {p: open(p, "rb")
