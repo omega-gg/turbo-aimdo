@@ -6,6 +6,10 @@ allocations when the model does not fit into VRAM, even on a very low VRAM GPU.
 
 Credits: [comfy-aimdo](https://github.com/Comfy-Org/comfy-aimdo)
 
+## Contribute
+
+PR(s) are welcomed
+
 ## Platforms
 
 - Windows 10 and later
