@@ -59,7 +59,7 @@ prefetch overlap is an optional add (file path, RAM-bound only).
 | `__init__.py` seam (`pre_torch_init`/`available`/`supports`/`load_pipe`/`prepare`/`reclaim`/`release`) | — | license-neutral interface the runner discovers as `backend/<mode>/` and drives |
 | `_load_streamed` two managed VBARs (transformer + text encoder) | DynamicVram cast path [CU ops.py cast_bias_weight L281, model_patcher.py L1779]; both in current_loaded_models [CU model_management.py L945, load_models_gpu L849]; ModelVBAR / _vbar_get [CU model_patcher.py L1743, L1799]; dynamic-for-dynamic no-unload [CU model_management.py L824-828] | transformer + TE coexist as managed dynamic VBARs |
 | text-encoder initial device | text_encoder_initial_device [CU model_management.py L1138] | TE offloaded, streamed via its own VBAR |
-| placement budgets (`placement.py`) | ensure_pin_budget [CU model_management.py L645-L656]; MIN_WEIGHT_MEMORY_RATIO [CU L453]; extra reserved [CU L789-L793]; minimum_inference_memory [CU L802]; get_free_memory [CU L1653]; lowvram_model_memory [CU L935] | measured GPU resident budget + RAM pin budget |
+| placement budgets (`placement.py`) | ensure_pin_budget [CU model_management.py L645-L656]; MAX_PINNED_MEMORY [CU L1488]; MIN_WEIGHT_MEMORY_RATIO [CU L453]; extra reserved [CU L789-L793]; minimum_inference_memory [CU L802]; get_free_memory [CU L1653]; lowvram_model_memory [CU L935] | measured GPU resident budget + RAM pin budget |
 
 ## Notes / rationale
 
@@ -70,9 +70,11 @@ prefetch overlap is an optional add (file path, RAM-bound only).
   stays bounded because every big weight streams from disk (page cache only).
 
 - **All-or-nothing pinning.** Pin the streamed set into a HostBuffer only when the *whole* set fits
-  the measured RAM budget. Partial-pinning a >RAM model on a tight GPU exhausts host-registration /
-  BAR mapping and OOMs the next alloc, so the >RAM case streams pageable from the page cache instead.
-  ComfyUI partial-pins via a headroom balancer we don't replicate.
+  the measured RAM budget — available RAM minus a ~2 GB floor, capped at `MAX_PINNED_MEMORY` (the OS
+  page-lock ceiling: 40% of RAM on Windows, 90% elsewhere). Partial-pinning a >RAM model on a tight
+  GPU exhausts host-registration / BAR mapping and OOMs the next alloc, so a set over the budget
+  streams pageable from the page cache instead. ComfyUI partial-pins via a headroom balancer we
+  don't replicate.
 
 - **Measured prefetch.** Double-buffer overlap is ON only when every weight is pinned (RAM-bound);
   OFF when some weights stream from disk (disk-bound — overlap can't beat the disk and adds sync
@@ -124,5 +126,6 @@ prefetch overlap is an optional add (file path, RAM-bound only).
   resident budget — plus the RAM pin budget; no hardcoded sizes. full_resident iff the transformer +
   activation reserve fits free VRAM, else stream with a measured resident budget. There is
   deliberately no RAM-vs-disk branch (the page cache / RAM-pressure cache handles that tier).
-  Constants map to ComfyUI: ~2 GB pin headroom (ensure_pin_budget), 40% resident-weight ratio
-  (MIN_WEIGHT_MEMORY_RATIO), 400/600 MB (+100 MB on 16 GB+) extra reserve, 0.8 GB inference reserve.
+  Constants map to ComfyUI: ~2 GB pin headroom (ensure_pin_budget), 40/90% RAM pin ceiling
+  (MAX_PINNED_MEMORY), 40% resident-weight ratio (MIN_WEIGHT_MEMORY_RATIO), 400/600 MB (+100 MB on
+  16 GB+) extra reserve, 0.8 GB inference reserve.
