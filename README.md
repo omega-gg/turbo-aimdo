@@ -16,7 +16,8 @@ the short edit list in [`aimdo/comfy/resync.md`](aimdo/comfy/resync.md):
 | ComfyUI     | `bb131be9e83d2f773c90f1d6f1e4b248a498c8c5` | `v0.27.0`               |
 | comfy-aimdo | `afa70d91ec9f6e1ab6758089d1b551f0269b6457` | `0.4.10`                |
 
-Credits:
+## Credits
+
 - [ComfyUI](https://github.com/comfy-org/comfyui)
 - [comfy-aimdo](https://github.com/Comfy-Org/comfy-aimdo)
 
