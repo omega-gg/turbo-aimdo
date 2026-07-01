@@ -25,8 +25,8 @@
 #
 #  v2 delegates all offloading to a byte-for-byte vendored ComfyUI snapshot (aimdo/comfy/) via the
 #  thin bridge in aimdo/adapter.py, so the SAME device-agnostic path serves CPU / CUDA / MPS.
-#  comfy-aimdo's CUDA-only VBAR is an optional accelerator (aimdo_enabled), off by default. The v1
-#  VBAR streamer (offload.py + placement.py) is kept as reference until Phase D re-homes it.
+#  comfy-aimdo's CUDA-only VBAR is an optional accelerator (aimdo_enabled) that streams weights
+#  disk->VRAM through ComfyUI's ModelPatcherDynamic, running models larger than VRAM+RAM.
 #
 # =================================================================================================
 

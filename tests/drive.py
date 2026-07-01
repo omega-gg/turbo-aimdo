@@ -93,13 +93,29 @@ def _step_cb(pipe_, step, ts, kw):
     return kw
 
 
+# Optional image input (edit / img2img): set AIMDO_IMAGE to a file, or "gradient" for a synthetic
+# one. flux2 and qwen-image-edit accept image=; text-to-image engines leave it unset.
+call_kwargs = dict(GEN)
+_img_src = os.environ.get("AIMDO_IMAGE")
+if _img_src:
+    from PIL import Image
+    if _img_src == "gradient":
+        import numpy as np
+        xs = np.linspace(0, 255, WIDTH, dtype=np.uint8)
+        arr = np.stack([np.tile(xs, (HEIGHT, 1)), np.tile(xs[::-1], (HEIGHT, 1)),
+                        np.full((HEIGHT, WIDTH), 128, np.uint8)], axis=-1)
+        call_kwargs["image"] = Image.fromarray(arr, "RGB")
+    else:
+        call_kwargs["image"] = Image.open(_img_src).convert("RGB").resize((WIDTH, HEIGHT))
+    print("image input:", _img_src)
+
 gen = torch.Generator(device="cpu").manual_seed(42)
 t1 = time.time()
 _t["start"] = t1
 with torch.inference_mode():
     img = pipe(prompt="a knight in armor", width=WIDTH, height=HEIGHT,
                num_inference_steps=STEPS, generator=gen,
-               callback_on_step_end=_step_cb, **GEN).images[0]
+               callback_on_step_end=_step_cb, **call_kwargs).images[0]
 total = time.time() - t1
 print("generate: %.1fs" % total)
 _marks = _t["steps"]
