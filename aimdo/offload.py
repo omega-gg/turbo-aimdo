@@ -417,37 +417,55 @@ class Offloader:
         return lora
 
     def _pin_memory(self, linears, offsets):
-        # Stage streamed weights into a HostBuffer (up to pin_budget) and pin each region with the
-        # ported pin_memory(): it partial-pins what fits the budget / page-lock ceiling and skips
-        # the rest (-> stream pageable), never wedging the context. See aimdo.md.
-        used = 0; pinned = []
+        # Mirror ComfyUI/comfy-aimdo's pin path [CU comfy/pinned_memory.py pin_memory L66-119],
+        # one weight at a time and reusing upstream's names (hostbuf / pin / offset / size): extend
+        # the buffer by one weight, register that region, and on a failed cudaHostRegister
+        # truncate(offset) to roll it back [CU L104, L108] so NO unpinned bytes stay committed. A
+        # dead staged buffer starves the OS page cache the file-streaming fallback relies on and
+        # forces a disk re-read every step. A weight that does not pin streams from the file
+        # (state.host stays None). The fill (read_file_slice) runs only after a successful register,
+        # so a failed pin costs no disk I/O. See aimdo.md.
+        used = 0; pinnable = []
         for m, weight_key in linears.items():
-            a = _align(offsets[weight_key].num_bytes)
-            if used + a > self.pin_budget:
+            size = _align(offsets[weight_key].num_bytes)
+            if used + size > self.pin_budget:
                 continue  # past budget -> this weight streams from file
-            pinned.append(weight_key); used += a
-        if not pinned:
+            pinnable.append(weight_key); used += size
+        if not pinnable:
             return
 
-        # HostBuffer sized to the pinned set (+ headroom).
-        self.hb = _hb.HostBuffer(0, 64 * 1024 * 1024, used + (64 << 20))
-        layout = {}
-        for weight_key in pinned:
-            p, file_offset, num_bytes, dtype, shape = offsets[weight_key]
-            offset = self.hb.size
-            self.hb.extend(_align(num_bytes), register=False)
-
-            # file -> HostBuffer once (host-only)
-            self.hb.read_file_slice(self.files[p], file_offset, num_bytes, offset=offset)
-            layout[weight_key] = (offset, num_bytes, dtype, shape)
-
-        host = _at.hostbuf_to_tensor(self.hb)  # uint8 view over the staged buffer
+        # Reserve address space for the would-be-pinned set; pages commit per weight via extend().
+        self.hb = hostbuf = _hb.HostBuffer(0, 64 * 1024 * 1024, used + (64 << 20))
         ok = 0
-        for weight_key, (offset, num_bytes, dtype, shape) in layout.items():
-            view = host[offset:offset + num_bytes]   # contiguous uint8 region
-            if pin_memory(view):
-                self._registered.append(view); ok += num_bytes
-                self.pins[weight_key] = view.view(dtype).view(shape)
+        for weight_key in pinnable:
+            p, file_offset, num_bytes, dtype, shape = offsets[weight_key]
+            size = _align(num_bytes)
+            offset = hostbuf.size
+            extended = False
+            try:
+                hostbuf.extend(size=size, register=False)
+                extended = True
+                pin = _at.hostbuf_to_tensor(hostbuf)[offset:offset + num_bytes]
+                if pin_memory(pin):
+                    # Pinned: fill it once (file -> pinned host); _do_read uses it for async H2D.
+                    hostbuf.read_file_slice(self.files[p], file_offset, num_bytes, offset=offset)
+                    self._registered.append(pin); ok += num_bytes
+                    self.pins[weight_key] = pin.view(dtype).view(shape)
+                    continue
+                del pin                                       # [CU pinned_memory.py L103]
+                hostbuf.truncate(offset, do_unregister=False) # [CU pinned_memory.py L104]
+            except RuntimeError:                              # [CU pinned_memory.py L106-L108]
+                if extended:
+                    hostbuf.truncate(offset, do_unregister=False)
+
+        # Nothing pinned (cudaHostRegister unavailable here): drop the now-empty buffer so its
+        # reserved space / prewarm pages do not linger and starve the page cache.
+        if not self.pins and self.hb is not None:
+            try:
+                self.hb.truncate(0, do_unregister=False); self.hb.__del__()
+            except Exception:
+                pass
+            self.hb = None
 
         print("[aimdo] pinned %d/%d streamed weight(s) = %.2f GB (budget %.2f GB)"
               % (len(self.pins), len(linears), ok / 1024 ** 3,
