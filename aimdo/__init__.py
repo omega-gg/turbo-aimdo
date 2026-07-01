@@ -124,6 +124,7 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
                                         local_files_only=True)
         adapter.keep_uncastable_resident(p.transformer, load_dev)
         adapter.install_prefetch(p.transformer)  # overlap block weight streaming with compute
+        adapter.prefer_cudnn_attention(p.transformer)  # ComfyUI's cuDNN-flash SDPA priority
         transformer_patcher = adapter.build_dynamic_patcher(p.transformer)
     else:
         # Native path: load every module onto the offload device (CPU) with mmap-backed safetensors;
@@ -133,6 +134,7 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
                                         low_cpu_mem_usage=True, local_files_only=True)
         adapter.comfy_ize(p.transformer)
         adapter.keep_uncastable_resident(p.transformer, load_dev)
+        adapter.prefer_cudnn_attention(p.transformer)
         transformer_patcher = adapter.build_patcher(p.transformer)
     patchers.append(transformer_patcher)
 
@@ -142,6 +144,7 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
     # for standard transformers encoders); otherwise the native cast path.
     if getattr(p, "text_encoder", None) is not None:
         adapter.comfy_ize(p.text_encoder)
+        adapter.prefer_cudnn_attention(p.text_encoder)
         if use_vbar:
             te_missing = adapter.assign_streamed_weights(p.text_encoder,
                                                          os.path.join(model, "text_encoder"))

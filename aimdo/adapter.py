@@ -73,7 +73,24 @@ def _comfy_class_for(module):
     for torch_cls, dwi_cls in _OP_MAP:
         if isinstance(module, torch_cls):
             return dwi_cls
+    # Custom RMSNorm classes (diffusers/transformers write their own, e.g. Qwen3RMSNorm, not
+    # torch.nn.RMSNorm) run an eager mul/rsqrt that is ~3.5x slower than ComfyUI's fused path.
+    # ComfyUI's own disable_weight_init.RMSNorm calls torch.nn.functional.rms_norm; route these
+    # through the SAME vendored class so the kernel (and behavior) matches ComfyUI exactly.
+    if hasattr(_dwi, "RMSNorm") and type(module).__name__.endswith("RMSNorm") \
+            and getattr(module, "weight", None) is not None:
+        return _dwi.RMSNorm
     return None
+
+
+def _prep_rmsnorm(module):
+    """Give a re-classed custom RMSNorm the attributes torch.nn.RMSNorm / F.rms_norm read
+    (normalized_shape, eps) that its original class didn't expose under those names."""
+    if not hasattr(module, "normalized_shape"):
+        module.normalized_shape = tuple(module.weight.shape)
+    if not hasattr(module, "eps") or module.eps is None:
+        module.eps = (getattr(module, "variance_epsilon", None)
+                      or getattr(module, "epsilon", None) or 1e-6)
 
 
 def comfy_ize(model):
@@ -90,6 +107,10 @@ def comfy_ize(model):
         dwi_cls = _comfy_class_for(m)
         if dwi_cls is None:
             continue
+
+        # Custom RMSNorm needs normalized_shape/eps before re-classing so F.rms_norm can read them.
+        if dwi_cls is _dwi.RMSNorm and not isinstance(m, torch.nn.RMSNorm):
+            _prep_rmsnorm(m)
 
         # Re-class the live instance. torch.nn.X subclasses share a compatible object layout, so
         # __class__ assignment is valid; diffusers custom subclasses that add only config (no forward
@@ -245,6 +266,37 @@ def load_streamed(model_cls, model_dir, dtype):
     comfy_ize(model)
     missing = assign_streamed_weights(model, model_dir)
     return model, missing
+
+
+def prefer_cudnn_attention(model):
+    """Give a diffusers/transformers model ComfyUI's attention behavior: prioritize the cuDNN-flash
+    SDPA backend (~2x the cutlass efficient kernel torch otherwise picks here).
+
+    ComfyUI applies this inside comfy.ops.scaled_dot_product_attention via sdpa_kernel(). We can't
+    just redirect torch's F.scaled_dot_product_attention to that wrapper -- the wrapper calls
+    F.scaled_dot_product_attention itself, so the redirect self-recurses. So we apply the SAME
+    mechanism (torch.nn.attention.sdpa_kernel with the SAME priority list comfy uses) around the
+    model's forward, which every internal F.sdpa call then respects. No-op if torch lacks
+    set_priority."""
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        import inspect
+        if "set_priority" not in inspect.signature(sdpa_kernel).parameters:
+            return False
+    except Exception:
+        return False
+
+    # Same list comfy.ops builds (ops.py: [CUDNN, FLASH, EFFICIENT, MATH]).
+    priority = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+    orig_forward = model.forward
+
+    def forward(*args, **kwargs):
+        with sdpa_kernel(priority, set_priority=True):
+            return orig_forward(*args, **kwargs)
+
+    model.forward = forward
+    return True
 
 
 def install_prefetch(model):
