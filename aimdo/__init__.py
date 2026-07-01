@@ -136,11 +136,22 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
     patchers.append(transformer_patcher)
 
     # Text encoder: also large for flux2/qwen -> its own managed patcher. Its custom norms (e.g.
-    # Qwen3RMSNorm) can't be comfy-ized, so keep them resident too.
+    # Qwen3RMSNorm) can't be comfy-ized, so keep them resident too. On VBAR we swap its weights for
+    # mmap/file-sliced ones and stream via ModelPatcherDynamic (disk keys match the live param names
+    # for standard transformers encoders); otherwise the native cast path.
     if getattr(p, "text_encoder", None) is not None:
         adapter.comfy_ize(p.text_encoder)
-        adapter.keep_uncastable_resident(p.text_encoder, load_dev)
-        encoder_patcher = adapter.build_patcher(p.text_encoder)
+        if use_vbar:
+            te_missing = adapter.assign_streamed_weights(p.text_encoder,
+                                                         os.path.join(model, "text_encoder"))
+            if te_missing:
+                print("aimdo: %d text-encoder weights had no matching param (skipped)"
+                      % len(te_missing), flush=True)
+            adapter.keep_uncastable_resident(p.text_encoder, load_dev)
+            encoder_patcher = adapter.build_dynamic_patcher(p.text_encoder)
+        else:
+            adapter.keep_uncastable_resident(p.text_encoder, load_dev)
+            encoder_patcher = adapter.build_patcher(p.text_encoder)
         patchers.append(encoder_patcher)
         p._aimdo_encoder = encoder_patcher
 

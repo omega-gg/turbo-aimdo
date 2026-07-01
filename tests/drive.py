@@ -82,12 +82,34 @@ print("load_pipe: %.1fs" % (time.time() - t0))
 aimdo.prepare(pipe)
 print("prepared; execution_device:", getattr(pipe, "_execution_device", "?"))
 
+# Per-phase timing: text-encode (start -> first denoise step) vs per-step denoise, via a step
+# callback. Lets us watch how streaming the text encoder / transformer changes each phase.
+_t = {"start": 0.0, "steps": []}
+
+
+def _step_cb(pipe_, step, ts, kw):
+    now = time.time()
+    _t["steps"].append(now)
+    return kw
+
+
 gen = torch.Generator(device="cpu").manual_seed(42)
 t1 = time.time()
+_t["start"] = t1
 with torch.inference_mode():
     img = pipe(prompt="a knight in armor", width=WIDTH, height=HEIGHT,
-               num_inference_steps=STEPS, generator=gen, **GEN).images[0]
-print("generate: %.1fs" % (time.time() - t1))
+               num_inference_steps=STEPS, generator=gen,
+               callback_on_step_end=_step_cb, **GEN).images[0]
+total = time.time() - t1
+print("generate: %.1fs" % total)
+_marks = _t["steps"]
+if _marks:
+    encode = _marks[0] - _t["start"]
+    step_times = [b - a for a, b in zip(_marks[:-1], _marks[1:])]
+    avg_step = (sum(step_times) / len(step_times)) if step_times else 0.0
+    vae = total - (_marks[-1] - _t["start"])
+    print("  text-encode+setup: %.1fs | denoise avg/step: %.2fs (%d steps) | vae+decode: %.1fs"
+          % (encode, avg_step, len(_marks), vae))
 if DEVICE == "cuda":
     print("peak VRAM: %.2f GB" % (torch.cuda.max_memory_allocated() / 1e9))
 

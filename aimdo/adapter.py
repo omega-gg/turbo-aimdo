@@ -210,33 +210,40 @@ def _shards(model_dir):
             if n.endswith(".safetensors")]
 
 
-def load_streamed(model_cls, model_dir, dtype):
-    """Build a diffusers model whose weights stream disk->VRAM through the VBAR path. Meta-loads the
-    module (no weight RAM), comfy-izes it, then assigns each weight from ComfyUI's load_safetensors()
-    -- an mmap-backed tensor whose storage carries a TensorFileSlice, so read_tensor_file_slice_into()
-    can fault it straight from the .safetensors shard. Returns (model, missing_keys)."""
-    from accelerate import init_empty_weights
+def assign_streamed_weights(model, model_dir):
+    """Replace `model`'s weights with mmap-backed, file-sliced tensors from its .safetensors shard(s)
+    (via ComfyUI's own load_safetensors), so the VBAR path can fault each straight from disk. Assumes
+    disk keys match model.named_parameters() (true for diffusers transformers and standard
+    transformers text encoders alike). Returns the list of disk keys with no matching param."""
     import comfy.utils as cu
-
-    cfg = model_cls.load_config(model_dir)
-    with init_empty_weights():
-        model = model_cls.from_config(cfg).to(dtype)
-
-    comfy_ize(model)
 
     sd = {}
     for shard in _shards(model_dir):
         part, _meta = cu.load_safetensors(shard)
         sd.update(part)
 
-    own = dict(model.named_parameters())
-    own.update(dict(model.named_buffers()))
+    own = set(n for n, _ in model.named_parameters())
+    own |= set(n for n, _ in model.named_buffers())
     missing = []
     for name, tensor in sd.items():
         if name not in own:
             missing.append(name)
             continue
         cu.set_attr_param(model, name, tensor)  # wraps in Parameter; keeps the file-sliced storage
+    return missing
+
+
+def load_streamed(model_cls, model_dir, dtype):
+    """Build a diffusers model whose weights stream disk->VRAM through the VBAR path: meta-load the
+    module (no weight RAM), comfy-ize it, then assign file-sliced weights. Returns (model, missing)."""
+    from accelerate import init_empty_weights
+
+    cfg = model_cls.load_config(model_dir)
+    with init_empty_weights():
+        model = model_cls.from_config(cfg).to(dtype)
+
+    comfy_ize(model)
+    missing = assign_streamed_weights(model, model_dir)
     return model, missing
 
 
