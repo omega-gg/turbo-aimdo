@@ -4,7 +4,7 @@ turbo-aimdo is a [turboCLI](https://omega.gg/turboCLI) high performance offloade
 Paired with a compliant CUDA GPU it improves generate times substantially through optimal memory
 allocations when the model does not fit into VRAM, even on a very low VRAM GPU.
 
-## ComfyUI snapshot
+## ComfyUI
 
 turbo-aimdo's offloader is a **byte-for-byte port** of ComfyUI's memory-management / model-patcher /
 ops subsystem (under `aimdo/comfy`), driven through the thin adapter in `aimdo/adapter.py`. The
