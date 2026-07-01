@@ -123,6 +123,7 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
                                         use_safetensors=True, low_cpu_mem_usage=True,
                                         local_files_only=True)
         adapter.keep_uncastable_resident(p.transformer, load_dev)
+        adapter.install_prefetch(p.transformer)  # overlap block weight streaming with compute
         transformer_patcher = adapter.build_dynamic_patcher(p.transformer)
     else:
         # Native path: load every module onto the offload device (CPU) with mmap-backed safetensors;

@@ -247,6 +247,68 @@ def load_streamed(model_cls, model_dir, dtype):
     return model, missing
 
 
+def install_prefetch(model):
+    """Overlap weight streaming with compute by copying ComfyUI's model_prefetch mechanism onto a
+    diffusers transformer. ComfyUI's own models call prefetch_queue_pop() between transformer blocks
+    so block N+1's weights stream on the offload stream while block N computes (av_model.py:913). A
+    diffusers forward doesn't, so every layer stalls waiting for its weights (~30% of a VBAR step).
+
+    We reproduce it with forward hooks: for each ModuleList of repeated blocks, build a prefetch
+    queue at the transformer's forward-start and pop it before each block runs; tear the queues down
+    at the transformer's forward-end. No-op unless comfy-aimdo/VBAR is active (make_prefetch_queue
+    returns None off the dynamic path). Returns the number of block sequences instrumented."""
+    import torch.nn as nn
+    import comfy.model_prefetch as mp
+
+    # Block sequences = top-level ModuleLists of >=2 identical-typed modules (layers + refiners).
+    sequences = []
+    for _name, child in model.named_children():
+        if isinstance(child, nn.ModuleList) and len(child) >= 2:
+            sequences.append(child)
+    if not sequences:
+        return 0
+
+    state = {}  # id(block_list) -> live queue for this forward
+
+    def _device_of(args, kwargs):
+        for t in list(args) + list(kwargs.values()):
+            if hasattr(t, "device"):
+                return t.device
+        return None
+
+    def _start(_m, args, kwargs):
+        dev = _device_of(args, kwargs)
+        if dev is None:
+            return
+        opts = {"prefetch_dynamic_vbars": True}
+        for seq in sequences:
+            state[id(seq)] = mp.make_prefetch_queue(list(seq), dev, opts)
+
+    def _block_pre(seq):
+        def hook(block, args, kwargs):
+            q = state.get(id(seq))
+            if q is not None:
+                dev = _device_of(args, kwargs)
+                if dev is not None:
+                    mp.prefetch_queue_pop(q, dev, block)
+        return hook
+
+    def _end(_m, args, kwargs, output):
+        dev = _device_of(args, kwargs)
+        for seq in sequences:
+            q = state.pop(id(seq), None)
+            if q is not None and dev is not None:
+                mp.prefetch_queue_pop(q, dev, None)  # drain/cleanup the last prefetched block
+        return output
+
+    model.register_forward_pre_hook(_start, with_kwargs=True)
+    for seq in sequences:
+        for block in seq:
+            block.register_forward_pre_hook(_block_pre(seq), with_kwargs=True)
+    model.register_forward_hook(_end, with_kwargs=True)
+    return len(sequences)
+
+
 def build_dynamic_patcher(model, load_device=None, offload_device=None, size=0):
     """Wrap a streamed model in ModelPatcherDynamic (the VBAR-aware patcher). On a CPU load_device it
     transparently reroutes to a plain ModelPatcher (VBAR is GPU-only)."""

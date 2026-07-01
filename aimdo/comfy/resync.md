@@ -17,7 +17,12 @@ edit list here**. Nothing else should differ from upstream.
 
 Flat modules: `model_management.py`, `model_patcher.py`, `ops.py`, `memory_management.py`,
 `utils.py`, `lora.py`, `float.py`, `quant_ops.py`, `patcher_extension.py`, `hooks.py`,
-`pinned_memory.py`, `cli_args.py`, `options.py`.
+`pinned_memory.py`, `model_prefetch.py`, `cli_args.py`, `options.py`.
+
+`model_prefetch.py` is vendored verbatim and driven from `aimdo/adapter.py:install_prefetch`, which
+reproduces ComfyUI's per-block `prefetch_queue_pop` loop (its own models call it from their forward,
+e.g. `comfy/ldm/lightricks/av_model.py`) via forward hooks on the diffusers transformer's block
+ModuleLists.
 Packages (whole dir): `comfy_types/`, `weight_adapter/`.
 
 `cli_args.py` + `options.py` are vendored as-is (not stubbed): `options.args_parsing` is `False`, so
