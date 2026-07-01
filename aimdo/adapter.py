@@ -34,6 +34,8 @@
 
 import aimdo.comfy  # noqa: F401  establishes the top-level `comfy` alias (see aimdo/comfy/__init__.py)
 
+import os
+
 import torch
 
 import comfy.model_management as mm
@@ -164,6 +166,91 @@ def build_patcher(model, load_device=None, offload_device=None, size=0):
     make_patchable(model)
     return model_patcher.ModelPatcher(model, load_device=load_device,
                                       offload_device=offload_device, size=size)
+
+
+# --------------------------------------------------------------------------------------------------
+# Optional VBAR acceleration (Phase D, CUDA only). Flipping comfy.memory_management.aimdo_enabled
+# turns on ComfyUI's own dynamic path: ModelPatcherDynamic allocates a comfy-aimdo ModelVBAR slot per
+# castable module and streams each weight disk->VRAM per forward via TensorFileSlice, so a model far
+# larger than VRAM (or VRAM+RAM) still runs. The weights must be mmap + file-sliced (not real CPU
+# tensors) for this to pay off; load_streamed() below wires that up using ComfyUI's own
+# load_safetensors(). On CPU/MPS this stays off and the native cast_to path runs.
+# --------------------------------------------------------------------------------------------------
+def enable_vbar(device):
+    """Flip aimdo_enabled so the vendored VBAR dynamic path engages. CUDA only. comfy-aimdo's global
+    init (allocator hooks) must have run in the seam's pre_torch_init() BEFORE torch was imported;
+    here -- after torch, with the device known -- we do the per-device init (init_device, like v1)
+    that ModelVBAR needs, then set the flag. Returns True when VBAR is active, False (-> native path)
+    off CUDA or if the device init fails."""
+    dev = str(device).lower()
+    if dev.split(":")[0] != "cuda":
+        return False
+    index = int(dev.split(":")[1]) if ":" in dev else 0
+    try:
+        import comfy_aimdo.control as ctl
+        if not ctl.devctxs:
+            ctl.init_device(index)
+    except Exception:
+        return False
+    import comfy.memory_management as memm
+    memm.aimdo_enabled = True
+    return True
+
+
+def _shards(model_dir):
+    """The .safetensors shard paths for a diffusers component dir, honouring a .index.json if present
+    (mirrors v1's _offsets shard discovery)."""
+    import json
+    idx = os.path.join(model_dir, "diffusion_pytorch_model.safetensors.index.json")
+    if os.path.exists(idx):
+        with open(idx) as f:
+            names = sorted(set(json.load(f)["weight_map"].values()))
+        return [os.path.join(model_dir, n) for n in names]
+    return [os.path.join(model_dir, n) for n in sorted(os.listdir(model_dir))
+            if n.endswith(".safetensors")]
+
+
+def load_streamed(model_cls, model_dir, dtype):
+    """Build a diffusers model whose weights stream disk->VRAM through the VBAR path. Meta-loads the
+    module (no weight RAM), comfy-izes it, then assigns each weight from ComfyUI's load_safetensors()
+    -- an mmap-backed tensor whose storage carries a TensorFileSlice, so read_tensor_file_slice_into()
+    can fault it straight from the .safetensors shard. Returns (model, missing_keys)."""
+    from accelerate import init_empty_weights
+    import comfy.utils as cu
+
+    cfg = model_cls.load_config(model_dir)
+    with init_empty_weights():
+        model = model_cls.from_config(cfg).to(dtype)
+
+    comfy_ize(model)
+
+    sd = {}
+    for shard in _shards(model_dir):
+        part, _meta = cu.load_safetensors(shard)
+        sd.update(part)
+
+    own = dict(model.named_parameters())
+    own.update(dict(model.named_buffers()))
+    missing = []
+    for name, tensor in sd.items():
+        if name not in own:
+            missing.append(name)
+            continue
+        cu.set_attr_param(model, name, tensor)  # wraps in Parameter; keeps the file-sliced storage
+    return model, missing
+
+
+def build_dynamic_patcher(model, load_device=None, offload_device=None, size=0):
+    """Wrap a streamed model in ModelPatcherDynamic (the VBAR-aware patcher). On a CPU load_device it
+    transparently reroutes to a plain ModelPatcher (VBAR is GPU-only)."""
+    import comfy.model_patcher as model_patcher
+    if load_device is None:
+        load_device = mm.get_torch_device()
+    if offload_device is None:
+        offload_device = mm.unet_offload_device()
+    make_patchable(model)
+    return model_patcher.ModelPatcherDynamic(model, load_device=load_device,
+                                             offload_device=offload_device, size=size)
 
 
 # --------------------------------------------------------------------------------------------------

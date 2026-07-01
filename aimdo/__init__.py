@@ -60,21 +60,28 @@ def supports(engine):
     return engine in ("flux2", "z-image", "qwen-image-edit")
 
 
+_vbar_ready = False
+
+
 def pre_torch_init():
-    """Bring up the vendored offloader. The native (device-agnostic) path needs NO comfy-aimdo, so
-    this never raises and never touches CUDA -- importing the adapter just establishes the `comfy`
-    alias and validates the vendored package.
+    """One-time setup; MUST run before `import torch` (the runner calls it there). Its ONLY job that
+    truly needs to precede torch is installing comfy-aimdo's CUDA allocator hooks -- so this
+    initialises comfy-aimdo here (and nowhere else) and imports NOTHING that pulls in torch.
 
-    We deliberately do NOT call comfy_aimdo.control.init() here. Its CUDA allocator / VBAR hooks map
-    physical VRAM through a separate CUDA VMM that competes with torch's pool (v1 aimdo.md), and they
-    also reserve lockable host RAM -- both of which starve the native cast path (measured: stole
-    enough VRAM to OOM z-image on a 4.3GB GPU, and pushed pinning over the RAM ceiling). comfy-aimdo
-    is only initialised in Phase D, behind an explicit opt-in, when the VBAR accelerator is enabled
-    (aimdo_enabled=True)."""
-    global _available
+    comfy-aimdo is optional: absent (cpu/mps builds) or a failed init just leaves `_vbar_ready` False
+    and the portable native cast path runs. When it succeeds, load_pipe flips aimdo_enabled and the
+    transformer streams through the VBAR dynamic path. The vendored `comfy` package (which imports
+    torch) is imported lazily in load_pipe, AFTER the runner's own `import torch`."""
+    global _available, _vbar_ready
 
-    # Importing the adapter establishes the `comfy` alias and validates the vendored package.
-    import aimdo.adapter  # noqa: F401
+    try:
+        import comfy_aimdo.control as ctl  # must not import torch at module load
+        _vbar_ready = bool(ctl.init())
+        if _vbar_ready:
+            ctl.set_log_warning()
+    except Exception:
+        _vbar_ready = False
+
     _available = True
 
 
@@ -86,26 +93,46 @@ def available():
 def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
     """Build a diffusers pipeline whose big models (transformer, text encoder) are offloaded through
     ComfyUI's ModelPatcher and streamed to the compute device per forward. Device-agnostic: `device`
-    selects CPU / CUDA / MPS via the adapter. lora_files kept for parity (wired in Phase C)."""
+    selects CPU / CUDA / MPS via the adapter. On CUDA with comfy-aimdo present the transformer uses
+    the VBAR dynamic path (streams disk->VRAM, runs models larger than VRAM+RAM); otherwise the
+    portable native cast path. lora_files kept for parity (wired later)."""
     import torch  # noqa: F401
     import aimdo.adapter as adapter
 
     load_dev = adapter.set_device(device)
 
-    PipelineCls, _Transformer = _classes(engine)
+    PipelineCls, Transformer = _classes(engine)
 
-    # Load every module onto the offload device (CPU) with mmap-backed safetensors. ModelPatcher
-    # then streams weights to `load_dev` per forward -- exactly like ComfyUI offloads a UNet.
-    p = PipelineCls.from_pretrained(model, torch_dtype=dtype, use_safetensors=True,
-                                    low_cpu_mem_usage=True, local_files_only=True)
+    # VBAR acceleration: CUDA + comfy-aimdo (initialised in pre_torch_init) -> flip aimdo_enabled so
+    # ComfyUI's dynamic path engages. Must run before loading so the vendored device-selection /
+    # lazy-load branches see the flag.
+    use_vbar = _vbar_ready and adapter.enable_vbar(device)
 
     patchers = []
 
-    # Transformer: the big model -> comfy-ize its standard leaves, keep custom param leaves (norms
-    # etc.) resident so they aren't stranded on the offload device, then wrap in a ModelPatcher.
-    adapter.comfy_ize(p.transformer)
-    adapter.keep_uncastable_resident(p.transformer, load_dev)
-    transformer_patcher = adapter.build_patcher(p.transformer)
+    if use_vbar:
+        # Stream the transformer disk->VRAM: meta-load + comfy-ize + assign mmap/file-sliced weights,
+        # then hand the ready module to the pipeline (from_pretrained keeps a provided transformer
+        # as-is, no reload).
+        tdir = os.path.join(model, "transformer")
+        transformer, missing = adapter.load_streamed(Transformer, tdir, dtype)
+        if missing:
+            print("aimdo: %d transformer weights had no matching module (skipped)" % len(missing),
+                  flush=True)
+        p = PipelineCls.from_pretrained(model, transformer=transformer, torch_dtype=dtype,
+                                        use_safetensors=True, low_cpu_mem_usage=True,
+                                        local_files_only=True)
+        adapter.keep_uncastable_resident(p.transformer, load_dev)
+        transformer_patcher = adapter.build_dynamic_patcher(p.transformer)
+    else:
+        # Native path: load every module onto the offload device (CPU) with mmap-backed safetensors;
+        # ModelPatcher streams weights to `load_dev` per forward -- exactly like ComfyUI offloads a
+        # UNet. Comfy-ize the standard leaves, keep custom param leaves (norms etc.) resident.
+        p = PipelineCls.from_pretrained(model, torch_dtype=dtype, use_safetensors=True,
+                                        low_cpu_mem_usage=True, local_files_only=True)
+        adapter.comfy_ize(p.transformer)
+        adapter.keep_uncastable_resident(p.transformer, load_dev)
+        transformer_patcher = adapter.build_patcher(p.transformer)
     patchers.append(transformer_patcher)
 
     # Text encoder: also large for flux2/qwen -> its own managed patcher. Its custom norms (e.g.
