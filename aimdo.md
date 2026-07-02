@@ -75,6 +75,12 @@ own `comfy.ops` modules and a `ModelPatcher`. The adapter closes that gap, minim
 - **`add_lora`** — on-cast LoRA: build the `{lora_key → model_weight_key}` map, hand it to
   `comfy.lora.load_lora` (vendored `weight_adapter`), register via `ModelPatcher.add_patches`. The
   deltas apply while each weight streams in — no fuse, no resident copy.
+- **`install_encode_cache`** — wrap the pipeline's `encode_prompt` so a repeated prompt returns cached
+  text embeddings and never re-runs (nor re-streams) the encoder — the diffusers analogue of ComfyUI's
+  default node cache. Copies `comfy_execution/caching.py::RAMPressureCache`: full-input-signature key,
+  embeddings held on CPU, eviction under host-RAM pressure via `comfy.model_management.get_free_memory`
+  (below `min(10GB, max(2GB, 10% RAM))`, worst `1.3**age × bytes` first). Validated against ComfyUI's
+  own `generate.sh`: identical cold time, encode skipped on a repeat prompt in both.
 
 ### Compute parity with ComfyUI
 

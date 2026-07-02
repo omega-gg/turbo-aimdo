@@ -194,14 +194,18 @@ def load_pipe(model, dtype, engine, device="cuda:0", lora_files=None):
     # NOTE: This might improve performances.
     p.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
 
+    # Cache the text-encoder output by prompt (ComfyUI's node cache): a repeated prompt then skips the
+    # encoder's forward, so the streamed encoder is never loaded and the transformer keeps the VRAM.
+    adapter.install_encode_cache(p)
+
     return p
 
 
 def prepare(pipe):
     """Per-generation load boundary: hand the managed models to ComfyUI's load_models_gpu, which
     partial-loads / streams them to the compute device (its dynamic path streams weights per-forward,
-    so this marks them loaded without pinning the whole set). With the runner's encode cache a repeated
-    prompt never runs the text encoder's forward, so its weights never stream and the transformer keeps
+    so this marks them loaded without pinning the whole set). When install_encode_cache serves a repeated
+    prompt the text encoder's forward never runs, so its weights never stream and the transformer keeps
     the throughput."""
     patchers = getattr(pipe, "_aimdo_patchers", None)
     if not patchers:
